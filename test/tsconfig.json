@@ -1,0 +1,10 @@
+{
+  // Settings for the test folder only (so the editor stops showing red errors).
+  // It reuses the main settings and never produces output files.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".."
+  },
+  "include": ["./**/*.ts"]
+}

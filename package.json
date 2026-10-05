@@ -1,0 +1,24 @@
+{
+  "name": "mcp-file-server",
+  "version": "0.1.0",
+  "description": "MCP File Server (M1 skeleton)",
+  "main": "dist/server.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx src/server.ts",
+    "start:built": "node dist/server.js",
+    "inspect": "npx @modelcontextprotocol/inspector tsx src/server.ts",
+    "test": "tsx test/m2-test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
