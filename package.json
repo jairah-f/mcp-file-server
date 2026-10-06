@@ -1,16 +1,26 @@
 {
   "name": "mcp-file-server",
-  "version": "0.1.0",
-  "description": "MCP File Server (M1 skeleton)",
+  "version": "0.3.0",
+  "description": "MCP File Server (stdio + Streamable HTTP)",
   "main": "dist/server.js",
-  "type": "module",
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "start": "tsx src/server.ts",
     "start:built": "node dist/server.js",
     "inspect": "npx @modelcontextprotocol/inspector tsx src/server.ts",
-    "test": "tsx test/m2-test.ts"
+    "test": "tsx test/m2-test.ts",
+    "start:http": "tsx src/server-http.ts",
+    "start:http:built": "node dist/server-http.js",
+    "test:http": "tsx test/m3-http-test.ts",
+    "test:all": "npm test && npm run test:http",
+    "pm2:start": "npm run build && pm2 start ecosystem.config.cjs",
+    "pm2:restart": "pm2 restart mcp-file-server",
+    "pm2:stop": "pm2 stop mcp-file-server",
+    "pm2:delete": "pm2 delete mcp-file-server",
+    "pm2:logs": "pm2 logs mcp-file-server",
+    "pm2:status": "pm2 list",
+    "check:endpoint": "tsx test/check-endpoint.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",
@@ -20,5 +30,6 @@
     "@types/node": "^26.6.4",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
-  }
+  },
+  "type": "module"
 }

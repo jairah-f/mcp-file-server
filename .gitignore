@@ -1,0 +1,7 @@
+node_modules/
+dist/
+
+# Secrets and local settings: never commit these
+.env
+.env.*
+*.log
