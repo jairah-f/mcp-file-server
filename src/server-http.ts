@@ -10,7 +10,9 @@
 import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { createMcpServer, ensureWorkspace, WORKSPACE_ROOT } from "./tools.js";
+import { ensureWorkspace, WORKSPACE_ROOT } from "./tools.js";
+import { createMcpServer } from "./server-factory.js";
+const mcpServer = createMcpServer();
 
 const MCP_PATH = "/mcp";
 

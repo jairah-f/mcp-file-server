@@ -22,14 +22,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const WORKSPACE_ROOT = path.resolve(__dirname, "..", "workspace");
 
 // Largest file we will read or write, so a huge file cannot flood memory.
-const MAX_FILE_BYTES = 1024 * 1024; // 1 MB
+export const MAX_FILE_BYTES = 1024 * 1024; // 1 MB
 
 // ---------------------------------------------------------------------------
 // Sandbox: the ONE place where user-provided paths are checked
 // ---------------------------------------------------------------------------
 
 // An error whose message is safe to show to the MCP client.
-class SandboxError extends Error {}
+export class SandboxError extends Error {}
 
 const OUTSIDE_MESSAGE = "Path is outside the workspace.";
 
@@ -52,7 +52,7 @@ function isInside(root: string, target: string): boolean {
 //   3. Check the resolved path is still inside the workspace.
 //   4. Follow symlinks/junctions: the real location of the deepest existing
 //      part of the path must ALSO be inside the real workspace folder.
-async function resolveSafePath(
+ export async function resolveSafePath(
   userPath: string,
   options: { allowRoot?: boolean } = {}
 ): Promise<string> {
@@ -119,17 +119,17 @@ async function resolveSafePath(
 // ---------------------------------------------------------------------------
 
 // Path shown to the client: always relative to the workspace, with "/" separators.
-function displayPath(absolutePath: string): string {
+export function displayPath(absolutePath: string): string {
   const rel = path.relative(WORKSPACE_ROOT, absolutePath);
   return rel === "" ? "." : rel.split(path.sep).join("/");
 }
 
-function ok(text: string): CallToolResult {
+export function ok(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
 }
 
 // Convert any error into a clear MCP tool error WITHOUT leaking absolute paths.
-function fail(err: unknown, kind: "File" | "Directory" = "File"): CallToolResult {
+export function fail(err: unknown, kind: "File" | "Directory" = "File"): CallToolResult {
   let message: string;
   if (err instanceof SandboxError) {
     message = err.message;
@@ -157,7 +157,7 @@ function fail(err: unknown, kind: "File" | "Directory" = "File"): CallToolResult
 }
 
 // Make sure a path is a regular file that is small enough to handle.
-async function assertReadableFile(target: string): Promise<void> {
+export async function assertReadableFile(target: string): Promise<void> {
   const stat = await fs.stat(target);
   if (!stat.isFile()) throw new SandboxError("That path is not a file.");
   if (stat.size > MAX_FILE_BYTES) {
@@ -172,10 +172,10 @@ async function assertReadableFile(target: string): Promise<void> {
 // Build a new MCP server with the five file tools registered.
 // Used by both entry points: server.ts (stdio) creates one for its single
 // connection, and server-http.ts creates a fresh one for every HTTP request.
-export function createMcpServer(): McpServer {
+export function createCoreServer(): McpServer {
   const server = new McpServer({
     name: "mcp-file-server",
-    version: "0.3.0",
+    version: "0.4.0",
   });
 
   // 1. list_files

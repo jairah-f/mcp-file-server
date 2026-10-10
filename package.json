@@ -1,7 +1,7 @@
 {
   "name": "mcp-file-server",
-  "version": "0.3.0",
-  "description": "MCP File Server (stdio + Streamable HTTP)",
+  "version": "0.4.0",
+  "description": "MCP File Server (stdio + Streamable HTTP, agent handoff, git-lite, search)",
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
@@ -13,7 +13,8 @@
     "start:http": "tsx src/server-http.ts",
     "start:http:built": "node dist/server-http.js",
     "test:http": "tsx test/m3-http-test.ts",
-    "test:all": "npm test && npm run test:http",
+    "test:m4": "tsx test/m4-test.ts",
+    "test:all": "npm test && npm run test:http && npm run test:m4",
     "pm2:start": "npm run build && pm2 start ecosystem.config.cjs",
     "pm2:restart": "pm2 restart mcp-file-server",
     "pm2:stop": "pm2 stop mcp-file-server",

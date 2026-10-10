@@ -116,11 +116,15 @@ async function main(): Promise<void> {
     // -------------------------------------------------------------------------
     section("Tool registration");
     const tools = (await client.listTools()).tools.map((t) => t.name).sort();
+
+     // M4 adds more tools, so check that the five original M2 tools still exist.
+    const coreTools = ["delete_file", "list_files", "read_file", "str_replace", "write_file"];
+
     check(
-      "exactly the five M2 tools are registered",
-      JSON.stringify(tools) === JSON.stringify(["delete_file", "list_files", "read_file", "str_replace", "write_file"]),
-      tools.join(", ")
-    );
+    "the five M2 core tools are registered",
+    coreTools.every((t) => tools.includes(t)),
+    tools.join(", ")
+);
 
     // -------------------------------------------------------------------------
     section("TEST 1: list_files('.')");

@@ -1,8 +1,8 @@
 // Entry point 1: MCP over stdio (used by MCP Inspector and the M2 tests).
 // For the remote/HTTP version see server-http.ts.
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createMcpServer, ensureWorkspace, WORKSPACE_ROOT } from "./tools.js";
-
+import { ensureWorkspace, WORKSPACE_ROOT } from "./tools.js";
+import { createMcpServer } from "./server-factory.js";
 async function main() {
   await ensureWorkspace();
 
