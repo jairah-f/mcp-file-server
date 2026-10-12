@@ -20,6 +20,10 @@ let projectRoot = "";
 let workspace = "";
 const TEST_DIR = "_m3_test";
 
+// M5: the server now requires a bearer token. This is a throwaway value that exists only inside this test.
+const TEST_TOKEN = "test-token-" + crypto.randomBytes(16).toString("hex");
+const AUTH = { Authorization: `Bearer ${TEST_TOKEN}` };
+
 // ---- tiny test helpers ------------------------------------------------------
 
 let passed = 0;
@@ -64,10 +68,13 @@ type RunningServer = {
   exited: Promise<number | null>;
 };
 
-function startServer(port: string): RunningServer {
+// "extra" can change or (with undefined) remove environment variables, e.g. MCP_AUTH_TOKEN.
+function startServer(port: string, extra: Record<string, string | undefined> = {}): RunningServer {
+  const env: NodeJS.ProcessEnv = { ...process.env, PORT: port, MCP_AUTH_TOKEN: TEST_TOKEN, ...extra };
+  for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];
   const child = spawn(process.execPath, ["--import", "tsx", path.join(projectRoot, "src", "server-http.ts")], {
     cwd: projectRoot,
-    env: { ...process.env, PORT: port },
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   let out = "";
@@ -94,12 +101,12 @@ function raw(
   method: string,
   urlPath: string,
   options: { headers?: Record<string, string>; body?: string } = {}
-): Promise<{ status: number; text: string }> {
+): Promise<{ status: number; text: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const req = http.request({ host: "127.0.0.1", port, method, path: urlPath, headers: options.headers }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (c: Buffer) => chunks.push(c));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8") }));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8"), headers: res.headers }));
     });
     req.on("error", reject);
     req.setTimeout(10000, () => req.destroy(new Error("timeout")));
@@ -108,13 +115,14 @@ function raw(
   });
 }
 
-const JSON_HEADERS = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
+const PLAIN_JSON_HEADERS = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" }; // NO token
+const JSON_HEADERS = { ...PLAIN_JSON_HEADERS, ...AUTH }; // with the correct token
 
 // Claims a huge body in the Content-Length header but sends none of it.
-function oversizeByHeader(port: number): Promise<number> {
+function oversizeByHeader(port: number, headers: Record<string, string> = JSON_HEADERS): Promise<number> {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: "127.0.0.1", port, method: "POST", path: "/mcp", headers: { ...JSON_HEADERS, "Content-Length": "99999999" } },
+      { host: "127.0.0.1", port, method: "POST", path: "/mcp", headers: { ...headers, "Content-Length": "99999999" } },
       (res) => {
         res.resume();
         resolve(res.statusCode ?? 0);
@@ -165,9 +173,9 @@ function externalIPv4(): string | undefined {
   return undefined;
 }
 
-async function newClient(port: number): Promise<Client> {
+async function newClient(port: number, headers: Record<string, string> = AUTH): Promise<Client> {
   const client = new Client({ name: "m3-test-client", version: "1.0.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { requestInit: { headers } }));
   return client;
 }
 
@@ -230,18 +238,123 @@ async function main(): Promise<void> {
     r = await raw(port, "POST", "/mcp", { headers: JSON_HEADERS, body: "" });
     check("POST /mcp with an empty body -> 400", r.status === 400, `${r.status}`);
     r = await raw(port, "POST", "/mcp", {
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...AUTH },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
     check("POST /mcp without the required Accept header -> 406", r.status === 406, `${r.status}`);
     r = await raw(port, "POST", "/mcp", {
-      headers: { "Content-Type": "text/plain", Accept: "application/json, text/event-stream" },
+      headers: { "Content-Type": "text/plain", Accept: "application/json, text/event-stream", ...AUTH },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
     check("POST /mcp with the wrong Content-Type is refused", r.status === 415 || r.status === 400, `${r.status}`);
     check("a huge Content-Length is refused with 413", (await oversizeByHeader(port)) === 413);
     const streamed = await oversizeByStreaming(port);
     check("a 6 MB streamed body is refused (413 or connection closed)", streamed === "status 413" || streamed === "connection closed", streamed);
+
+    // -------------------------------------------------------------------------
+    section("AUTHENTICATION (M5): bearer token required on POST /mcp");
+    const listBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    const authFile = path.join(workspace, TEST_DIR, "auth-must-not-exist.txt");
+    const keepFile = path.join(workspace, TEST_DIR, "auth-keep.txt");
+    await fs.mkdir(path.join(workspace, TEST_DIR), { recursive: true });
+    await fs.writeFile(keepFile, "KEEP");
+    const writeBody = JSON.stringify({
+      jsonrpc: "2.0", id: 2, method: "tools/call",
+      params: { name: "write_file", arguments: { path: `${TEST_DIR}/auth-must-not-exist.txt`, content: "SHOULD NOT BE WRITTEN" } },
+    });
+    const deleteBody = JSON.stringify({
+      jsonrpc: "2.0", id: 3, method: "tools/call",
+      params: { name: "delete_file", arguments: { path: `${TEST_DIR}/auth-keep.txt` } },
+    });
+
+    let a401 = await raw(port, "POST", "/mcp", { headers: PLAIN_JSON_HEADERS, body: listBody });
+    check("no Authorization header -> 401", a401.status === 401, `${a401.status} ${a401.text}`);
+    check("the 401 carries a WWW-Authenticate: Bearer header", String(a401.headers["www-authenticate"] ?? "").startsWith("Bearer"), String(a401.headers["www-authenticate"]));
+    check("the 401 body does not list any tools", !a401.text.includes("write_file") && !a401.text.includes('"tools"'), a401.text);
+    const wrongTokens: Array<[string, string]> = [
+      ["a wrong token", "Bearer not-the-right-token-at-all"],
+      ["a token that is the right one plus one extra character", `Bearer ${TEST_TOKEN}x`],
+      ["a token that is the right one minus the last character", `Bearer ${TEST_TOKEN.slice(0, -1)}`],
+      ["a very short token", "Bearer a"],
+      ["a 10 KB token (different length must not crash anything)", `Bearer ${"a".repeat(10_000)}`],
+      ["the word Bearer with no token", "Bearer"],
+      ["Bearer followed by spaces only", "Bearer    "],
+      ["the right token with the wrong scheme (Basic)", `Basic ${TEST_TOKEN}`],
+      ["the right token with no scheme at all", TEST_TOKEN],
+      ["an empty Authorization header", ""],
+    ];
+    for (const [label, value] of wrongTokens) {
+      const x = await raw(port, "POST", "/mcp", { headers: { ...PLAIN_JSON_HEADERS, Authorization: value }, body: listBody });
+      check(`${label} -> 401`, x.status === 401, `${x.status} ${x.text}`);
+    }
+    let q = await raw(port, "POST", `/mcp?token=${TEST_TOKEN}`, { headers: PLAIN_JSON_HEADERS, body: listBody });
+    check("the token in the URL query string is NOT accepted -> 401", q.status === 401, `${q.status}`);
+    q = await raw(port, "POST", "/mcp", { headers: { ...PLAIN_JSON_HEADERS, "X-Api-Key": TEST_TOKEN, Cookie: `token=${TEST_TOKEN}` }, body: listBody });
+    check("the token in another header or cookie is NOT accepted -> 401", q.status === 401, `${q.status}`);
+
+    // The important proof: nothing runs without the token.
+    let w = await raw(port, "POST", "/mcp", { headers: PLAIN_JSON_HEADERS, body: writeBody });
+    check("an unauthenticated write_file call -> 401", w.status === 401, `${w.status} ${w.text}`);
+    check("...and the file was NOT created on disk", !(await exists(authFile)));
+    w = await raw(port, "POST", "/mcp", { headers: { ...PLAIN_JSON_HEADERS, Authorization: "Bearer wrong-token-value-123" }, body: deleteBody });
+    check("a delete_file call with a wrong token -> 401", w.status === 401, `${w.status} ${w.text}`);
+    check("...and the file was NOT deleted", (await exists(keepFile)) && (await readDisk(`${TEST_DIR}/auth-keep.txt`)) === "KEEP");
+
+    // Authentication is checked before the body is looked at.
+    q = await raw(port, "POST", "/mcp", { headers: PLAIN_JSON_HEADERS, body: "{not json" });
+    check("invalid JSON without a token -> 401 (not 400): the body is not even examined", q.status === 401, `${q.status}`);
+    check("a huge Content-Length without a token -> 401 (nothing is read)", (await oversizeByHeader(port, PLAIN_JSON_HEADERS)) === 401);
+
+    // The SDK client (what a real MCP client uses).
+    let refused = "";
+    try {
+      const noToken = await newClient(port, {});
+      await noToken.listTools();
+      await noToken.close().catch(() => {});
+    } catch (err) {
+      refused = err instanceof Error ? err.message : String(err);
+    }
+    check("an MCP client without the token cannot connect or list tools", refused !== "", "it connected");
+    refused = "";
+    try {
+      const badToken = await newClient(port, { Authorization: "Bearer wrong-token-value-123" });
+      await badToken.listTools();
+      await badToken.close().catch(() => {});
+    } catch (err) {
+      refused = err instanceof Error ? err.message : String(err);
+    }
+    check("an MCP client with a wrong token cannot connect or list tools", refused !== "", "it connected");
+
+    // The correct token reaches the real MCP handler.
+    let good = await raw(port, "POST", "/mcp", { headers: JSON_HEADERS, body: listBody });
+    check("the correct token -> 200 and the real tool list", good.status === 200 && good.text.includes("write_file") && good.text.includes("read_file"), `${good.status} ${good.text.slice(0, 120)}`);
+    good = await raw(port, "POST", "/mcp", { headers: { ...PLAIN_JSON_HEADERS, Authorization: `bearer ${TEST_TOKEN}` }, body: listBody });
+    check("the scheme word is case-insensitive ('bearer') -> 200", good.status === 200, `${good.status}`);
+    await fs.rm(keepFile, { force: true });
+
+    // The protected-route order stays as before: 404 / 405 do not need a token and reveal nothing.
+    let nf = await raw(port, "GET", "/workspace/notes.txt");
+    check("unknown paths still answer 404 without a token", nf.status === 404);
+    nf = await raw(port, "GET", "/mcp");
+    check("GET /mcp still answers 405 without a token (and shows no data)", nf.status === 405 && !nf.text.includes("write_file"));
+
+    section("Startup refuses to run without a usable MCP_AUTH_TOKEN");
+    const badStarts: Array<[string, string | undefined]> = [
+      ["the variable is not set at all", undefined],
+      ["the variable is empty", ""],
+      ["the variable is only spaces", "     "],
+      ["the token is too short", "short-secret-1"],
+    ];
+    for (const [label, value] of badStarts) {
+      const s2 = startServer("0", { MCP_AUTH_TOKEN: value });
+      const code = await Promise.race([s2.exited, sleep(15000).then(() => "timeout" as const)]);
+      if (code === "timeout") s2.child.kill();
+      const out = s2.output();
+      check(`${label}: it exits with code 1`, code === 1, String(code));
+      check(`${label}: it names MCP_AUTH_TOKEN in the error`, out.includes("MCP_AUTH_TOKEN"), out);
+      check(`${label}: it never started listening`, !out.includes("listening on"), out);
+      if (value && value.trim() !== "") check(`${label}: the error does not print the value`, !out.includes(value), out);
+    }
 
     // -------------------------------------------------------------------------
     section("MCP over Streamable HTTP: connect and list tools");
@@ -363,6 +476,14 @@ async function main(): Promise<void> {
     const secondCode = await second.exited;
     check("it exits with a failure code", secondCode === 1, `code ${secondCode}`);
     check("and explains that the port is in use", second.output().includes("already in use"), second.output());
+
+    // -------------------------------------------------------------------------
+    section("The token and the Authorization header are never logged");
+    const log = server.output();
+    check("the server log does not contain the token", !log.includes(TEST_TOKEN));
+    check("the server log does not contain any wrong token that was tried", !log.includes("wrong-token-value-123") && !log.includes("not-the-right-token-at-all"));
+    check("the server log does not mention an Authorization header or the word Bearer", !/authorization|bearer/i.test(log));
+    check("rejected requests ARE logged (status 401, no body details)", /POST \/mcp -> 401/.test(log));
 
     // -------------------------------------------------------------------------
     section("Clean shutdown");

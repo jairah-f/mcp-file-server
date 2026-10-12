@@ -87,10 +87,12 @@ function git(cwd: string, ...args: string[]): string {
 
 type RunningServer = { child: ChildProcess; output: () => string; exited: Promise<number | null> };
 
+// M5: the HTTP server now requires a bearer token. This is a throwaway value that exists only inside this test.
+const TEST_TOKEN = "test-token-" + crypto.randomBytes(16).toString("hex");
 function startServer(env: NodeJS.ProcessEnv = {}): RunningServer {
   const child = spawn(process.execPath, ["--import", "tsx", path.join(projectRoot, "src", "server-http.ts")], {
     cwd: projectRoot,
-    env: { ...process.env, PORT: "0", ...env },
+    env: { ...process.env, PORT: "0", MCP_AUTH_TOKEN: TEST_TOKEN, ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let out = "";
@@ -111,7 +113,9 @@ async function waitForPort(server: RunningServer): Promise<number> {
 
 async function newClient(port: number): Promise<Client> {
   const client = new Client({ name: "m4-test-client", version: "1.0.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${TEST_TOKEN}` } } })
+  );
   return client;
 }
 

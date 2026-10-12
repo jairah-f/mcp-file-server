@@ -7,12 +7,19 @@
 //
 // Stateless mode: every request gets its own fresh MCP server + transport.
 // That keeps the code simple and means a restart (for example by PM2) loses nothing.
+//
+// AUTHENTICATION (M5): every POST /mcp must carry the header
+//     Authorization: Bearer <the value of the MCP_AUTH_TOKEN environment variable>
+// Without it (or with a wrong value) the answer is 401 and no MCP tool is touched.
+// If MCP_AUTH_TOKEN is not set, the server refuses to start. The token is never
+// written to the log. HTTPS (ngrok) hides the token on the way; it is this check
+// that decides who is allowed to use the tools.
+import crypto from "node:crypto";
 import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ensureWorkspace, WORKSPACE_ROOT } from "./tools.js";
 import { createMcpServer } from "./server-factory.js";
-const mcpServer = createMcpServer();
 
 const MCP_PATH = "/mcp";
 
@@ -34,6 +41,28 @@ function parsePort(value: string | undefined): number {
   return port;
 }
 const PORT = parsePort(process.env.PORT);
+
+// The secret the clients must send. It comes ONLY from the environment (never from a file in the project).
+// There is no default value: no token means no server.
+const MIN_TOKEN_LENGTH = 16;
+function loadAuthToken(value: string | undefined): string {
+  const token = (value ?? "").trim();
+  if (token === "") {
+    console.error(
+      "MCP_AUTH_TOKEN is not set (or is empty). The HTTP server refuses to start without it, because it would be open to everyone.\n" +
+        'PowerShell:  $env:MCP_AUTH_TOKEN = "<your-long-random-token>"   then start the server again. See README.md.'
+    );
+    process.exit(1);
+  }
+  if (token.length < MIN_TOKEN_LENGTH) {
+    console.error(`MCP_AUTH_TOKEN is too short. Use at least ${MIN_TOKEN_LENGTH} characters (the README shows how to make a long random one).`);
+    process.exit(1);
+  }
+  return token;
+}
+const AUTH_TOKEN = loadAuthToken(process.env.MCP_AUTH_TOKEN);
+// Both sides are hashed first, so the comparison always works on two values of the same length.
+const AUTH_TOKEN_HASH = crypto.createHash("sha256").update(AUTH_TOKEN).digest();
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -113,6 +142,17 @@ function describeRpc(body: unknown): string {
     .join(",");
 }
 
+// True only when the request carries "Authorization: Bearer <correct token>".
+// The scheme word is case-insensitive (as HTTP allows); the token itself is compared exactly.
+function isAuthorized(req: IncomingMessage): boolean {
+  const header = req.headers.authorization;
+  if (typeof header !== "string") return false;
+  const match = /^Bearer[ \t]+(\S+)$/i.exec(header.trim());
+  if (!match) return false;
+  const given = crypto.createHash("sha256").update(match[1] as string).digest();
+  return crypto.timingSafeEqual(given, AUTH_TOKEN_HASH); // constant-time, never throws: both are 32 bytes
+}
+
 // ---------------------------------------------------------------------------
 // Request handling
 // ---------------------------------------------------------------------------
@@ -129,6 +169,17 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, info: { 
   // Stateless mode has no server-to-client stream or sessions, so only POST is allowed.
   if (req.method !== "POST") {
     sendJson(res, 405, jsonRpcError(-32000, "Method not allowed. Use POST."), { Allow: "POST" });
+    return;
+  }
+
+  // Authentication comes BEFORE the body is read and before any MCP code runs.
+  // Missing and wrong credentials get the same answer, so a caller learns nothing about the token.
+  if (!isAuthorized(req)) {
+    sendJson(res, 401, jsonRpcError(-32001, "Unauthorized."), {
+      "WWW-Authenticate": 'Bearer realm="mcp-file-server"',
+      Connection: "close", // do not wait for (or accept) the rest of an unauthenticated upload
+    });
+    res.once("finish", () => req.destroy());
     return;
   }
 
