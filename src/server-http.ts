@@ -1,25 +1,30 @@
 // Entry point 2: MCP over Streamable HTTP (for ngrok / remote MCP clients).
 //
-// The ONLY thing this server exposes is the MCP endpoint:   POST /mcp
-// Every other path answers 404. There is no static file serving and no other
-// file API, so the only way to touch files is through the five MCP tools,
-// which all go through the workspace sandbox in tools.ts.
+// What this server answers:
+//   POST /mcp                  the MCP endpoint (needs a credential, see below)
+//   OAuth sign-in endpoints    ONLY when OAuth is configured (MCP_PUBLIC_URL + MCP_OWNER_PASSWORD):
+//                              /.well-known/oauth-*, /register, /authorize, /consent, /token, /revoke
+// Every other path answers 404. There is no static file serving and no other file API,
+// so the only way to touch files is through the MCP tools, which all go through the
+// workspace sandbox in tools.ts.
+//
+// Who may call POST /mcp (checked BEFORE the request body is read, and before any tool runs):
+//   1. the fixed token from MCP_AUTH_TOKEN (used by the endpoint checker and the tests), OR
+//   2. an OAuth access token that this server issued after the owner approved a connection
+//      (only when OAuth is configured; the token must be meant for this server's /mcp address).
+// Anything else gets 401. There is no unauthenticated fallback: without MCP_AUTH_TOKEN the server will not start.
 //
 // Stateless mode: every request gets its own fresh MCP server + transport.
 // That keeps the code simple and means a restart (for example by PM2) loses nothing.
-//
-// AUTHENTICATION (M5): every POST /mcp must carry the header
-//     Authorization: Bearer <the value of the MCP_AUTH_TOKEN environment variable>
-// Without it (or with a wrong value) the answer is 401 and no MCP tool is touched.
-// If MCP_AUTH_TOKEN is not set, the server refuses to start. The token is never
-// written to the log. HTTPS (ngrok) hides the token on the way; it is this check
-// that decides who is allowed to use the tools.
+// (OAuth clients and tokens are the exception: they live in memory, so a restart means "reconnect" in Claude.)
 import crypto from "node:crypto";
 import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ensureWorkspace, WORKSPACE_ROOT } from "./tools.js";
 import { createMcpServer } from "./server-factory.js";
+import { createOAuthApp, isOAuthPath, loadOAuthConfig, resourceMetadataUrl, sameResource, SCOPE } from "./oauth.js";
+import type { OAuthConfig } from "./oauth.js";
 
 const MCP_PATH = "/mcp";
 
@@ -42,27 +47,87 @@ function parsePort(value: string | undefined): number {
 }
 const PORT = parsePort(process.env.PORT);
 
-// The secret the clients must send. It comes ONLY from the environment (never from a file in the project).
-// There is no default value: no token means no server.
+// ---------------------------------------------------------------------------
+// Credentials (read once at start-up; the server refuses to start if they are unusable)
+// ---------------------------------------------------------------------------
+
 const MIN_TOKEN_LENGTH = 16;
-function loadAuthToken(value: string | undefined): string {
-  const token = (value ?? "").trim();
+
+// The fixed token. Never printed, never logged.
+function loadAuthToken(): string {
+  const token = (process.env.MCP_AUTH_TOKEN ?? "").trim();
   if (token === "") {
-    console.error(
-      "MCP_AUTH_TOKEN is not set (or is empty). The HTTP server refuses to start without it, because it would be open to everyone.\n" +
-        'PowerShell:  $env:MCP_AUTH_TOKEN = "<your-long-random-token>"   then start the server again. See README.md.'
-    );
+    console.error("MCP_AUTH_TOKEN is not set (or is empty). The HTTP server refuses to start without it, because it would be open to everyone.");
+    console.error('PowerShell:  $env:MCP_AUTH_TOKEN = "<your-long-random-token>"   then start the server again. See README.md.');
     process.exit(1);
   }
   if (token.length < MIN_TOKEN_LENGTH) {
-    console.error(`MCP_AUTH_TOKEN is too short. Use at least ${MIN_TOKEN_LENGTH} characters (the README shows how to make a long random one).`);
+    console.error(`MCP_AUTH_TOKEN is too short. Use at least ${MIN_TOKEN_LENGTH} characters (see README.md for how to make a long random one).`);
     process.exit(1);
   }
   return token;
 }
-const AUTH_TOKEN = loadAuthToken(process.env.MCP_AUTH_TOKEN);
-// Both sides are hashed first, so the comparison always works on two values of the same length.
-const AUTH_TOKEN_HASH = crypto.createHash("sha256").update(AUTH_TOKEN).digest();
+const AUTH_TOKEN = loadAuthToken();
+
+// OAuth sign-in is optional: null means "not configured", so only the fixed token works.
+// Half-configured or unsafe settings stop the server with a plain-English message (no secrets in it).
+function loadOAuth(): OAuthConfig | null {
+  try {
+    return loadOAuthConfig(process.env);
+  } catch (err) {
+    console.error(`OAuth settings problem: ${err instanceof Error ? err.message : "unknown error"}`);
+    process.exit(1);
+  }
+}
+const OAUTH_CONFIG = loadOAuth();
+const OAUTH = OAUTH_CONFIG
+  ? createOAuthApp(OAUTH_CONFIG, (message) => console.log(`${new Date().toISOString()} ${message}`))
+  : null;
+
+// Compare two secrets without leaking where they differ (both are hashed to the same length first).
+function sameSecret(a: string, b: string): boolean {
+  return crypto.timingSafeEqual(crypto.createHash("sha256").update(a).digest(), crypto.createHash("sha256").update(b).digest());
+}
+
+// "Authorization: Bearer <token>" -> the token, or null when the header is missing or shaped differently.
+function bearerToken(req: IncomingMessage): string | null {
+  const header = req.headers.authorization;
+  if (typeof header !== "string") return null;
+  const match = /^Bearer[ \t]+(\S+)$/i.exec(header.trim());
+  return match ? match[1] : null;
+}
+
+// Is this request allowed to use /mcp?  { ok: true }  or  { ok: false, presented }
+// (presented = the caller sent a token, but it was not accepted).
+async function authenticate(req: IncomingMessage): Promise<{ ok: true } | { ok: false; presented: boolean }> {
+  const token = bearerToken(req);
+  if (token === null) return { ok: false, presented: false };
+
+  // 1. The fixed token.
+  if (sameSecret(token, AUTH_TOKEN)) return { ok: true };
+
+  // 2. An OAuth access token issued by this server (only when OAuth is configured).
+  if (OAUTH && OAUTH_CONFIG) {
+    try {
+      const info = await OAUTH.provider.verifyAccessToken(token); // throws for unknown or expired tokens
+      const forThisServer = info.resource !== undefined && sameResource(info.resource, OAUTH_CONFIG.resourceUrl);
+      const hasScope = info.scopes.includes(SCOPE);
+      const notExpired = info.expiresAt === undefined || info.expiresAt * 1000 > Date.now();
+      if (forThisServer && hasScope && notExpired) return { ok: true };
+    } catch {
+      // not a valid OAuth token: fall through to "rejected"
+    }
+  }
+  return { ok: false, presented: true };
+}
+
+// The WWW-Authenticate header of a 401. With OAuth on, it tells the caller where to find the sign-in information.
+function challengeHeader(presented: boolean): string {
+  let value = 'Bearer realm="mcp-file-server"';
+  if (OAUTH_CONFIG) value += `, resource_metadata="${resourceMetadataUrl(OAUTH_CONFIG)}"`;
+  if (presented) value += ', error="invalid_token"';
+  return value;
+}
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -142,17 +207,6 @@ function describeRpc(body: unknown): string {
     .join(",");
 }
 
-// True only when the request carries "Authorization: Bearer <correct token>".
-// The scheme word is case-insensitive (as HTTP allows); the token itself is compared exactly.
-function isAuthorized(req: IncomingMessage): boolean {
-  const header = req.headers.authorization;
-  if (typeof header !== "string") return false;
-  const match = /^Bearer[ \t]+(\S+)$/i.exec(header.trim());
-  if (!match) return false;
-  const given = crypto.createHash("sha256").update(match[1] as string).digest();
-  return crypto.timingSafeEqual(given, AUTH_TOKEN_HASH); // constant-time, never throws: both are 32 bytes
-}
-
 // ---------------------------------------------------------------------------
 // Request handling
 // ---------------------------------------------------------------------------
@@ -160,7 +214,14 @@ function isAuthorized(req: IncomingMessage): boolean {
 async function handleRequest(req: IncomingMessage, res: ServerResponse, info: { rpc: string }): Promise<void> {
   const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
 
-  // Only /mcp exists.
+  // OAuth sign-in endpoints exist ONLY when OAuth is configured. They are handled by the OAuth module
+  // (see oauth.ts), which has its own body-size limits and never touches the MCP tools.
+  if (OAUTH && isOAuthPath(pathname)) {
+    OAUTH.app(req, res);
+    return;
+  }
+
+  // Otherwise only /mcp exists.
   if (pathname !== MCP_PATH) {
     sendJson(res, 404, { error: `Not found. The only endpoint is ${MCP_PATH}.` });
     return;
@@ -172,14 +233,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, info: { 
     return;
   }
 
-  // Authentication comes BEFORE the body is read and before any MCP code runs.
-  // Missing and wrong credentials get the same answer, so a caller learns nothing about the token.
-  if (!isAuthorized(req)) {
-    sendJson(res, 401, jsonRpcError(-32001, "Unauthorized."), {
-      "WWW-Authenticate": 'Bearer realm="mcp-file-server"',
-      Connection: "close", // do not wait for (or accept) the rest of an unauthenticated upload
+  // Who is calling? This happens BEFORE the body is read, so an unauthenticated caller
+  // cannot make the server read, parse or run anything.
+  const auth = await authenticate(req);
+  if (!auth.ok) {
+    sendJson(res, 401, jsonRpcError(-32001, "Unauthorized. A valid access token is required."), {
+      "WWW-Authenticate": challengeHeader(auth.presented),
+      Connection: "close",
     });
-    res.once("finish", () => req.destroy());
     return;
   }
 
@@ -199,7 +260,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, info: { 
   info.rpc = describeRpc(body);
 
   // A fresh server + transport per request (stateless mode).
-  const mcpServer = createMcpServer();
+const mcpServer = createMcpServer();
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless: no sessions
     enableJsonResponse: true, // plain JSON replies: simple and tunnel-friendly
@@ -217,6 +278,7 @@ const httpServer = http.createServer((req, res) => {
   const info = { rpc: "" };
 
   // One log line per request (method, path, status, time, MCP method).
+  // Only the path is logged: never the query string, headers or body (codes and tokens can be in those).
   res.on("finish", () => {
     const pathname = (req.url ?? "/").split("?")[0];
     const rpc = info.rpc ? ` ${info.rpc}` : "";
@@ -252,6 +314,7 @@ function shutdown(reason: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`${reason} received, shutting down...`);
+  OAUTH?.provider.dispose(); // stop the OAuth clean-up timer; clients and tokens are forgotten with the process
   httpServer.close(() => {
     console.log("Server closed.");
     process.exit(0);
@@ -274,6 +337,11 @@ async function main(): Promise<void> {
     const port = typeof address === "object" && address ? address.port : PORT;
     console.log(`MCP File Server (Streamable HTTP) listening on http://${HOST}:${port}${MCP_PATH}`);
     console.log(`Workspace: ${WORKSPACE_ROOT}`);
+    if (OAUTH_CONFIG) {
+    console.log(`Sign-in: fixed token AND OAuth. Public address: ${OAUTH_CONFIG.publicUrl.origin}`);
+    } else {
+    console.log("Sign-in: fixed token only (OAuth is not configured).");
+}
   });
 }
 
