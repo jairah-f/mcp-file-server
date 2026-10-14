@@ -28,9 +28,8 @@ import type { OAuthConfig } from "./oauth.js";
 
 const MCP_PATH = "/mcp";
 
-// Listen on this computer only. ngrok runs on the same computer and forwards
-// to this address, so nothing else on your network can reach the server directly.
-const HOST = "127.0.0.1";
+// Use the configured host. Render requires 0.0.0.0 for public web services.
+const HOST = process.env.HOST ?? "127.0.0.1";
 
 // A 1 MB file (the tool limit) plus JSON overhead fits comfortably.
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -332,6 +331,7 @@ process.on("message", (msg) => {
 
 async function main(): Promise<void> {
   await ensureWorkspace();
+  console.log(`DEBUG HOST=${process.env.HOST ?? "(not set)"}, PORT=${process.env.PORT ?? "(not set)"}`);
   httpServer.listen(PORT, HOST, () => {
     const address = httpServer.address();
     const port = typeof address === "object" && address ? address.port : PORT;
