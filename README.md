@@ -2,19 +2,99 @@
 
 A school project: a small [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server, written in TypeScript, that lets an MCP client (an AI agent) work with files inside a designated `workspace/` folder, and cannot reach anything outside it.
 
-## Current status: M5 — Completed
-- **M1:** MCP server skeleton.
-- **M2:** five file tools protected by a workspace sandbox.
-- **M3:** the server is served over **Streamable HTTP** at `/mcp`, exposed over **HTTPS with ngrok**, and kept running with **PM2**.
-- **M4:** an **agent handoff protocol** (shared state files), three read-only **git-lite** tools, and a **search** tool.
-- **M5:** bearer-token authentication for the HTTP endpoint and the multi-step agent handoff workflow.
+## Project status: M1–M5 implemented
 
-M5 implementation is complete. The automated authentication checks passed in the reported Linux development environment. See **What was actually tested** for environment-specific limitations: a live ngrok connection, Windows deployment, and a real remote multi-agent demonstration still require local verification.
+The project is organized into five milestones. The server currently registers **17 MCP tools** and supports both stdio and Streamable HTTP transports. M5 authentication and workflow code is implemented; some environment-specific and live-demo checks still need to be verified on the machine where you deploy it.
+
+### Milestone roadmap
+
+| Milestone | What was built | Main files / features | Verification |
+| --- | --- | --- | --- |
+| **M1 — Project skeleton** | TypeScript MCP server foundation and initial `list_files` tool. | `src/server.ts`, `package.json`, `tsconfig.json` | Install dependencies, build, and launch the stdio server / MCP Inspector. |
+| **M2 — Core file tools and sandbox** | Five workspace file tools with path validation to keep file access inside `workspace/`; text-file size limits. | `src/tools.ts`; `list_files`, `read_file`, `write_file`, `str_replace`, `delete_file` | `npm test` |
+| **M3 — HTTP deployment** | Streamable HTTP endpoint at `/mcp`, endpoint checker, ngrok tunnelling instructions, and PM2 process configuration. | `src/server-http.ts`, `test/m3-http-test.ts`, `ecosystem.config.cjs` | `npm run test:http`; then verify the local endpoint. ngrok and Windows deployment require local checks. |
+| **M4 — Agent handoff and workspace utilities** | Shared state/plan/checkpoint/decision files, read-only Git status/diff/log tools, and workspace text search. | `src/handoff.ts`, `src/git-tools.ts`, `src/search.ts`, `workspace/` | `npm run test:m4` |
+| **M5 — Authentication and multi-step workflow** | Bearer-token authentication for HTTP requests plus a documented workflow for agents to hand off work through shared project-state files. | `MCP_AUTH_TOKEN`; auth checks in the HTTP tests; handoff tools from M4 | `npm run test:all`; verify valid and invalid tokens locally and demonstrate a handoff with your MCP client. |
+
+**Recommended order for a new user:** follow the setup and testing instructions below first, then read the milestone guide for the feature you want to run. The table describes the project's milestone progression; it does not mean ngrok, Windows, or a live remote multi-agent demonstration have already been verified in every environment.
 
 ```
 
 Remote MCP client --HTTPS--> ngrok URL --> localhost:3000 --> /mcp --> check the token --> MCP server --> workspace/
 
+```
+
+## Follow the milestones
+
+These milestones build on one another. If you are setting up the repository from GitHub, start with the common setup, then use the matching milestone section.
+
+### Before you start
+
+- Install Node.js **18.18 or newer** and npm.
+- Install Git and make sure it is available in your terminal.
+- Clone the repository and open the project folder in VS Code.
+- In the VS Code terminal, run:
+
+```bash
+npm install
+npm run build
+```
+
+### M1 — Create and run the MCP server skeleton
+
+M1 establishes the TypeScript project and the initial `list_files` MCP tool. The stdio entry point is used for local clients and MCP Inspector.
+
+```bash
+npm run build
+npm start
+```
+
+To inspect the stdio server with MCP Inspector, use a separate terminal and run `npm run inspect`. Leave the server running while you inspect it.
+
+### M2 — Add file tools and workspace sandbox
+
+M2 adds `list_files`, `read_file`, `write_file`, `str_replace`, and `delete_file`. These tools use paths relative to `workspace/`; the sandbox rejects paths that escape the workspace.
+
+```bash
+npm test
+```
+
+Only use test files and sample content when trying write or delete operations. The tools can modify or delete files inside `workspace/`.
+
+### M3 — Run the HTTP endpoint and optional remote tunnel
+
+M3 adds the Streamable HTTP endpoint at `http://127.0.0.1:3000/mcp`. M5 authentication now applies to this endpoint, so set `MCP_AUTH_TOKEN` before starting the HTTP server. Follow the **Authentication (M5)** and **M3 step by step** sections below for PowerShell, ngrok, and PM2 instructions.
+
+```bash
+npm run test:http
+```
+
+### M4 — Use handoff, Git-lite, and search tools
+
+M4 adds four workspace handoff files, eight handoff tools, three read-only Git-lite tools, and `search_files`. The handoff files allow a new agent session to read the latest project status and continue from the recorded plan.
+
+```bash
+npm run test:m4
+```
+
+Before starting a new agent session, call `read_project_state`, `read_plan_log`, `read_checkpoints`, and `read_decisions`. The Git-lite tools are read-only; they cannot commit or push changes.
+
+### M5 — Authenticate requests and demonstrate a multi-step handoff
+
+M5 protects the HTTP endpoint with a bearer token and combines authentication with the M4 handoff workflow. Set `MCP_AUTH_TOKEN` in the same terminal used to start the HTTP server, and configure the MCP client to send that value as its bearer token. Do not save the real token in this README, source code, screenshots, or Git.
+
+1. Start the authenticated HTTP server using the instructions in **Authentication (M5)**.
+2. Confirm that a request without the token is rejected with HTTP `401`.
+3. Connect using the valid token and confirm the MCP tools are available.
+4. In the first agent session, read the handoff files and complete a small task.
+5. Update the plan and project state, and record a checkpoint or decision if appropriate.
+6. Start a second agent session, read the handoff files, and continue from the recorded state.
+7. Record which parts were actually demonstrated in your environment. Automated tests alone do not prove that a live ngrok connection or remote multi-agent handoff has been completed.
+
+Run the complete automated test suite after setup:
+
+```bash
+npm run test:all
 ```
 
 ## All tools (17)
@@ -283,7 +363,7 @@ Run these in the VS Code terminal, in the project folder. The variable lives onl
 
 ```powershell
 
-\# 1. Make a long random token (32 random bytes as 64 hex characters) and keep it in this terminal only.
+# 1. Make a long random token (32 random bytes as 64 hex characters) and keep it in this terminal only.
 
 $bytes = New-Object byte[] 32
 
@@ -291,11 +371,11 @@ $bytes = New-Object byte[] 32
 
 $env:MCP_AUTH_TOKEN = -join ($bytes | ForEach-Object { $_.ToString("x2") })
 
-\# 2. Optional: copy it to the clipboard to paste into a password manager later (nothing is printed).
+# 2. Optional: copy it to the clipboard to paste into a password manager later (nothing is printed).
 
 $env:MCP_AUTH_TOKEN | Set-Clipboard
 
-\# 3. Start the server in this same terminal.
+# 3. Start the server in this same terminal.
 
 npm run start:http
 
